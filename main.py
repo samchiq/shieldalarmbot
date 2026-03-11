@@ -2,14 +2,14 @@ import os
 import json
 import logging
 import asyncio
+import aiohttp
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, ChatMemberHandler
+    Application, CommandHandler,
+    CallbackQueryHandler, ContextTypes, ChatMemberHandler
 )
 from dotenv import load_dotenv
-import tzevaadom
 
 load_dotenv()
 
@@ -17,6 +17,14 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 10000))
 SUBSCRIPTIONS_FILE = 'subscriptions.json'
+
+OREF_URL = "https://www.oref.org.il/WarningMessages/alert/alerts.json"
+OREF_HEADERS = {
+    "Referer": "https://www.oref.org.il/",
+    "X-Requested-With": "XMLHttpRequest",
+    "User-Agent": "Mozilla/5.0",
+}
+POLL_INTERVAL = 3  # секунды
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,17 +35,16 @@ logger = logging.getLogger(__name__)
 # ==================== РЕГИОНЫ ====================
 
 REGIONS = {
-    "all":         ("Вся страна",          None),
-    "tel_aviv":    ("Тель-Авив и центр",   ["Tel Aviv", "Dan Region", "Sharon", "Shfela"]),
-    "jerusalem":   ("Иерусалим",           ["Jerusalem"]),
-    "haifa":       ("Хайфа",               ["Haifa", "Haifa - Carmel"]),
-    "south":       ("Юг",                  ["South", "Lakhish", "Western Lakhish", "Ashdod", "Ashkelon"]),
-    "gaza_border": ("Граница Газы",         ["Gaza Envelope", "Shaar Hanegev", "Sdot Negev"]),
-    "north":       ("Север и Голаны",       ["North", "Upper Galilee", "Golan Heights", "Western Galilee"]),
+    "all":         ("🌍 Вся страна",        None),
+    "tel_aviv":    ("🏙 Тель-Авив и центр", ["תל אביב", "דן", "שרון", "שפלה"]),
+    "jerusalem":   ("🏛 Иерусалим",         ["ירושלים"]),
+    "haifa":       ("🌊 Хайфа",             ["חיפה", "כרמל"]),
+    "south":       ("🏜 Юг",               ["לכיש", "אשדוד", "אשקלון", "באר שבע", "נגב"]),
+    "gaza_border": ("🔴 Граница Газы",      ["שדרות", "נתיבות", "שער הנגב", "שדות נגב", "עוטף עזה"]),
+    "north":       ("🏔 Север и Голаны",    ["גליל", "גולן", "עכו", "טבריה", "צפון"]),
 }
 
 # ==================== ХРАНИЛИЩЕ ПОДПИСОК ====================
-# Формат: { "chat_id": "region_key" }
 
 def load_subscriptions() -> dict:
     if os.path.exists(SUBSCRIPTIONS_FILE):
@@ -54,10 +61,10 @@ subscriptions: dict = load_subscriptions()
 # ==================== ОБРАБОТЧИКИ БОТА ====================
 
 def build_region_keyboard():
-    buttons = []
-    for key, (label, _) in REGIONS.items():
-        buttons.append([InlineKeyboardButton(label, callback_data=f"region:{key}")])
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"region:{key}")]
+        for key, (label, _) in REGIONS.items()
+    ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -65,10 +72,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_region_keyboard()
     )
 
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Выберите регион для уведомлений:",
+        reply_markup=build_region_keyboard()
+    )
+
 async def handle_region_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     region_key = query.data.split(":")[1]
     chat_id = str(query.message.chat_id)
 
@@ -83,56 +95,66 @@ async def handle_region_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(f"✅ Регион выбран: {region_label}\n\nБот будет присылать 🛡🛡🛡 при тревоге.")
 
 async def handle_new_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Бот добавлен в группу — предлагаем выбрать регион"""
     result = update.my_chat_member
     if result and result.new_chat_member.status in ("member", "administrator"):
-        chat_id = result.chat.id
         await context.bot.send_message(
-            chat_id=chat_id,
+            chat_id=result.chat.id,
             text="👋 Привет! Я бот оповещений о ракетных атаках.\nВыберите регион:",
             reply_markup=build_region_keyboard()
         )
 
-async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /settings — поменять регион"""
-    await update.message.reply_text(
-        "Выберите регион для уведомлений:",
-        reply_markup=build_region_keyboard()
-    )
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
-# ==================== ЛОГИКА ТРЕВОГ ====================
+# ==================== POLLING ТРЕВОГ ====================
 
-def alert_matches_region(zone_en: str, region_key: str) -> bool:
-    """Проверяем, входит ли зона тревоги в выбранный регион"""
+def alert_matches_region(cities: list, region_key: str) -> bool:
     if region_key == "all":
         return True
-    zones = REGIONS[region_key][1] or []
-    return any(z.lower() in zone_en.lower() or zone_en.lower() in z.lower() for z in zones)
+    keywords = REGIONS[region_key][1] or []
+    for city in cities:
+        for kw in keywords:
+            if kw in city:
+                return True
+    return False
 
-def make_alert_handler(app: Application, loop: asyncio.AbstractEventLoop):
-    """Создаём обработчик тревог для tzevaadom (работает в отдельном потоке)"""
-    notified_chats_this_alert = set()  # Чтобы не спамить один чат за одну тревогу
+async def alert_polling_loop(app: Application):
+    last_alert_id = None
+    logger.info("Alert polling loop started")
 
-    def handler(alerts: list):
-        nonlocal notified_chats_this_alert
-        notified_chats_this_alert = set()
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(OREF_URL, headers=OREF_HEADERS, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    text = await resp.text(encoding='utf-8-sig')
+                    text = text.strip()
 
-        for alert in alerts:
-            zone_en = alert.get("zone_en", "")
-            for chat_id, region_key in list(subscriptions.items()):
-                if chat_id in notified_chats_this_alert:
-                    continue
-                if alert_matches_region(zone_en, region_key):
-                    notified_chats_this_alert.add(chat_id)
-                    asyncio.run_coroutine_threadsafe(
-                        app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡"),
-                        loop
-                    )
+                    if not text:
+                        last_alert_id = None
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue
 
-    return handler
+                    data = json.loads(text)
+                    alert_id = data.get("id")
+                    cities = data.get("data", [])
+
+                    if alert_id and alert_id != last_alert_id and cities:
+                        logger.info(f"New alert [{alert_id}]: {cities}")
+                        last_alert_id = alert_id
+
+                        for chat_id, region_key in list(subscriptions.items()):
+                            if alert_matches_region(cities, region_key):
+                                try:
+                                    await app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡")
+                                except Exception as e:
+                                    logger.error(f"Failed to send to {chat_id}: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+
+            await asyncio.sleep(POLL_INTERVAL)
 
 # ==================== ВЕБ-СЕРВЕР ====================
 
@@ -171,13 +193,9 @@ async def main():
     await application.bot.set_webhook(url=webhook_path, drop_pending_updates=True)
     logger.info(f"Webhook set to {webhook_path}")
 
-    # Запускаем tzevaadom listener в фоновом потоке
-    loop = asyncio.get_event_loop()
-    alert_handler = make_alert_handler(application, loop)
-    tzevaadom.alerts_listener(alert_handler)  # запускает daemon thread
-    logger.info("Alert listener started")
+    asyncio.create_task(alert_polling_loop(application))
+    logger.info("Alert polling started")
 
-    # Веб-сервер
     app = web.Application()
     app['bot_app'] = application
     app.router.add_get('/health', health_check_handler)
