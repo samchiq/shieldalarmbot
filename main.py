@@ -9,7 +9,7 @@ from telegram.ext import (
     Application, CommandHandler,
     CallbackQueryHandler, ContextTypes, ChatMemberHandler
 )
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -142,34 +142,52 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_telethon_listener(bot_app: Application):
     client = TelegramClient('session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start(bot_token=TELEGRAM_BOT_TOKEN)
-    logger.info("Telethon client started as bot, listening to @RocketAlert")
-    # Проверяем что можем читать канал
+    logger.info("Telethon client started as bot")
+
     try:
         entity = await client.get_entity(ROCKET_ALERT_CHANNEL)
         logger.info(f"Successfully connected to channel: {entity.title}")
     except Exception as e:
         logger.error(f"Failed to get channel entity: {e}")
+        return
 
-    @client.on(events.NewMessage(chats=ROCKET_ALERT_CHANNEL))
-    async def handler(event):
-        text = event.message.text or ""
-        if not is_alert_message(text):
-            return
+    last_message_id = None
 
-        zones = parse_alert_zones(text)
-        if not zones:
-            return
+    # Получаем ID последнего сообщения при старте чтобы не слать старые тревоги
+    async for msg in client.iter_messages(entity, limit=1):
+        last_message_id = msg.id
+    logger.info(f"Starting from message id: {last_message_id}")
 
-        logger.info(f"Alert detected, zones: {zones}")
+    while True:
+        try:
+            new_messages = []
+            async for msg in client.iter_messages(entity, min_id=last_message_id, limit=20):
+                new_messages.append(msg)
 
-        for chat_id, region_key in list(subscriptions.items()):
-            if alert_matches_region(zones, region_key):
-                try:
-                    await bot_app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡")
-                except Exception as e:
-                    logger.error(f"Failed to send to {chat_id}: {e}")
+            # iter_messages возвращает от новых к старым — разворачиваем
+            for msg in reversed(new_messages):
+                last_message_id = max(last_message_id or 0, msg.id)
+                text = msg.text or ""
+                if not is_alert_message(text):
+                    continue
 
-    await client.run_until_disconnected()
+                zones = parse_alert_zones(text)
+                if not zones:
+                    continue
+
+                logger.info(f"Alert detected [msg {msg.id}], zones: {zones}")
+
+                for chat_id, region_key in list(subscriptions.items()):
+                    if alert_matches_region(zones, region_key):
+                        try:
+                            await bot_app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡")
+                        except Exception as e:
+                            logger.error(f"Failed to send to {chat_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+
+        await asyncio.sleep(3)
 
 # ==================== ВЕБ-СЕРВЕР ====================
 
