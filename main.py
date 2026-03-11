@@ -129,25 +129,30 @@ async def alert_polling_loop(app: Application):
                     text = await resp.text(encoding='utf-8-sig')
                     text = text.strip()
 
-                    if not text:
+                    logger.debug(f"Oref response [{resp.status}]: {repr(text[:100])}")
+
+                    if not text or text in ("", "null", "[]", "{}"):
                         last_alert_id = None
-                        await asyncio.sleep(POLL_INTERVAL)
-                        continue
+                    else:
+                        try:
+                            data = json.loads(text)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Non-JSON response: {repr(text[:200])}")
+                            data = {}
 
-                    data = json.loads(text)
-                    alert_id = data.get("id")
-                    cities = data.get("data", [])
+                        alert_id = data.get("id")
+                        cities = data.get("data", [])
 
-                    if alert_id and alert_id != last_alert_id and cities:
-                        logger.info(f"New alert [{alert_id}]: {cities}")
-                        last_alert_id = alert_id
+                        if alert_id and alert_id != last_alert_id and cities:
+                            logger.info(f"New alert [{alert_id}]: {cities}")
+                            last_alert_id = alert_id
 
-                        for chat_id, region_key in list(subscriptions.items()):
-                            if alert_matches_region(cities, region_key):
-                                try:
-                                    await app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡")
-                                except Exception as e:
-                                    logger.error(f"Failed to send to {chat_id}: {e}")
+                            for chat_id, region_key in list(subscriptions.items()):
+                                if alert_matches_region(cities, region_key):
+                                    try:
+                                        await app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡")
+                                    except Exception as e:
+                                        logger.error(f"Failed to send to {chat_id}: {e}")
 
             except asyncio.CancelledError:
                 break
