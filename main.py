@@ -23,7 +23,7 @@ SUBSCRIPTIONS_FILE = 'subscriptions.json'
 TELEGRAM_API_ID = int(os.getenv('TELEGRAM_API_ID'))
 TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
 SESSION_BASE64 = os.getenv('SESSION_BASE64')
-ROCKET_ALERT_CHANNEL = 'RocketAlert'  # @RocketAlert
+ROCKET_ALERT_CHANNEL = 'RocketAlerTest'  # @RocketAlert
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
