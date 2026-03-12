@@ -22,6 +22,7 @@ SUBSCRIPTIONS_FILE = 'subscriptions.json'
 # Telethon (user account для чтения канала)
 TELEGRAM_API_ID = int(os.getenv('TELEGRAM_API_ID'))
 TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
+SESSION_BASE64 = os.getenv('SESSION_BASE64')
 ROCKET_ALERT_CHANNEL = 'RocketAlert'  # @RocketAlert
 
 logging.basicConfig(
@@ -140,8 +141,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== TELETHON LISTENER ====================
 
 async def start_telethon_listener(bot_app: Application):
+    # Загружаем сессию из переменной окружения
+    if SESSION_BASE64:
+        import base64
+        session_bytes = base64.b64decode(SESSION_BASE64)
+        with open('session.session', 'wb') as f:
+            f.write(session_bytes)
+        logger.info("Session loaded from SESSION_BASE64")
+    else:
+        logger.warning("SESSION_BASE64 not set, trying existing session file")
+
     client = TelegramClient('session', TELEGRAM_API_ID, TELEGRAM_API_HASH)
-    await client.start(bot_token=TELEGRAM_BOT_TOKEN)
+    await client.start()
     logger.info("Telethon client started as bot")
 
     try:
