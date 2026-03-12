@@ -23,7 +23,7 @@ SUBSCRIPTIONS_FILE = 'subscriptions.json'
 TELEGRAM_API_ID = int(os.getenv('TELEGRAM_API_ID'))
 TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
 SESSION_BASE64 = os.getenv('SESSION_BASE64')
-ROCKET_ALERT_CHANNEL = 'RocketAlert'  # @RocketAlert
+ROCKET_ALERT_CHANNEL = 'rocketest'  # @RocketAlert
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,13 +35,13 @@ logger = logging.getLogger(__name__)
 # Ключи — зоны из заголовков сообщений канала (zone headers)
 
 REGIONS = {
-    "all":              ("Вся страна",         None),
-    "tel_aviv":         ("Тель-Авив и центр",  ["Tel Aviv", "Dan Region", "Sharon", "Yarkon"]),
-    "jerusalem":        ("Иерусалим",           ["Jerusalem"]),
-    "haifa":            ("Хайфа",               ["Menashe", "HaMifratz", "HaCarmel"]),
-    "south":            ("Юг",                  ["Lakhish", "Western Lakhish", "Shfela", "Shfelat Yehuda", "Negev"]),
-    "gaza_border":      ("Граница Газы",         ["Gaza Envelope", "Shaar Hanegev", "Sdot Negev"]),
-    "north":            ("Север и Голаны",       ["Upper Galilee", "Center Galilee", "Lower Galilee",
+    "all":              ("🌍 Вся страна",         None),
+    "tel_aviv":         ("🏙 Тель-Авив и центр",  ["Tel Aviv", "Dan Region", "Sharon", "Yarkon"]),
+    "jerusalem":        ("🏛 Иерусалим",           ["Jerusalem"]),
+    "haifa":            ("🌊 Хайфа",               ["Menashe", "HaMifratz", "HaCarmel"]),
+    "south":            ("🏜 Юг",                  ["Lakhish", "Western Lakhish", "Shfela", "Shfelat Yehuda", "Negev"]),
+    "gaza_border":      ("🔴 Граница Газы",         ["Gaza Envelope", "Shaar Hanegev", "Sdot Negev"]),
+    "north":            ("🏔 Север и Голаны",       ["Upper Galilee", "Center Galilee", "Lower Galilee",
                                                      "Confrontation Line", "Northern Golan", "Southern Golan",
                                                      "HaAmakim", "Samaria", "Judea"]),
 }
@@ -59,6 +59,10 @@ def save_subscriptions(subs: dict):
         json.dump(subs, f)
 
 subscriptions: dict = load_subscriptions()
+
+# Время последней отправки щитов для каждого чата (chat_id -> timestamp)
+last_sent: dict = {}
+COOLDOWN_SECONDS = 120
 
 # ==================== ПАРСИНГ СООБЩЕНИЯ ====================
 
@@ -99,13 +103,13 @@ def build_region_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Выберите регион:",
+        "🛡 Бот оповещений о ракетных атаках.\n\nВыберите регион для получения уведомлений:",
         reply_markup=build_region_keyboard()
     )
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Выберите регион:",
+        "Выберите регион для уведомлений:",
         reply_markup=build_region_keyboard()
     )
 
@@ -123,7 +127,7 @@ async def handle_region_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     save_subscriptions(subscriptions)
     region_label = REGIONS[region_key][0]
     await query.edit_message_text(
-        f"Регион выбран: {region_label}"
+        f"✅ Регион выбран: {region_label}\n\nБот будет присылать 🛡🛡🛡 при тревоге."
     )
 
 async def handle_new_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,7 +135,7 @@ async def handle_new_chat_member(update: Update, context: ContextTypes.DEFAULT_T
     if result and result.new_chat_member.status in ("member", "administrator"):
         await context.bot.send_message(
             chat_id=result.chat.id,
-            text="Выберите регион",
+            text="👋 Привет! Я бот оповещений о ракетных атаках.\nВыберите регион:",
             reply_markup=build_region_keyboard()
         )
 
@@ -188,10 +192,15 @@ async def start_telethon_listener(bot_app: Application):
 
                 logger.info(f"Alert detected [msg {msg.id}], zones: {zones}")
 
+                now = asyncio.get_event_loop().time()
                 for chat_id, region_key in list(subscriptions.items()):
                     if alert_matches_region(zones, region_key):
+                        if now - last_sent.get(chat_id, 0) < COOLDOWN_SECONDS:
+                            logger.info(f"Cooldown active for {chat_id}, skipping")
+                            continue
                         try:
                             await bot_app.bot.send_message(chat_id=int(chat_id), text="🛡🛡🛡")
+                            last_sent[chat_id] = now
                         except Exception as e:
                             logger.error(f"Failed to send to {chat_id}: {e}")
 
